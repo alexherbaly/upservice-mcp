@@ -3,6 +3,7 @@ name = "upservice-mcp"
 version = "0.1.0"
 description = "MCP server wrapping the Upservice Public API (employees, projects, sprints, tasks, tags, directories, channel messages)"
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.10"
 dependencies = [
     "mcp>=1.2.0",

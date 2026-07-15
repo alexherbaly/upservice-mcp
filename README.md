@@ -47,7 +47,9 @@ Requires [`uv`](https://docs.astral.sh/uv/) installed (`brew install uv` or see 
 ```
 
 If this project is published to a git remote, `--from` can point at it directly instead of a local path:
-`"args": ["--from", "git+https://your-git-host/upservice-mcp", "upservice-mcp"]` — then a colleague only needs the URL and their own API key, no file copying at all.
+`"args": ["--from", "git+https://github.com/alexherbaly/upservice-mcp", "upservice-mcp"]` — then a colleague only needs the URL and their own API key, no file copying at all.
+
+Pin to a released tag (e.g. `git+https://github.com/alexherbaly/upservice-mcp@v0.1.0`) rather than the bare URL — without a ref, `uvx` tracks the `main` branch, so a bad push to `main` breaks everyone's server on their next run.
 
 `uv` builds and caches an isolated environment on first run; nothing is installed system-wide.
 
