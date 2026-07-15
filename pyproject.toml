@@ -1,6 +1,6 @@
 [project]
 name = "upservice-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "MCP server wrapping the Upservice Public API (employees, projects, sprints, tasks, tags, directories, channel messages)"
 readme = "README.md"
 license = "MIT"
