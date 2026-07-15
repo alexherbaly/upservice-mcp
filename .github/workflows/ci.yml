@@ -26,3 +26,23 @@ jobs:
 
       - name: Import server module
         run: python -c "import upservice_mcp.server"
+
+  # Moves the floating `stable` tag to this commit once the build above passes. Colleagues
+  # point uvx at `@stable` and get whatever last passed CI on main automatically -- no one
+  # has to remember to cut a new version tag for routine fixes. Cut a real vN.N.N tag (and
+  # GitHub release) separately for anything you want to freeze/reference by name.
+  promote-stable:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Move stable tag to this commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -f stable
+          git push origin stable --force
