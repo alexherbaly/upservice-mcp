@@ -12,6 +12,7 @@ covers the class of drift that has actually broken this server before
 """
 import json
 import sys
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -20,26 +21,35 @@ SNAPSHOT_PATH = Path(__file__).resolve().parent.parent / "openapi_snapshot.json"
 
 
 def fetch_live_spec() -> dict:
-    with urllib.request.urlopen(SPEC_URL, timeout=30) as resp:
-        return json.load(resp)
+    try:
+        with urllib.request.urlopen(SPEC_URL, timeout=30) as resp:
+            return json.load(resp)
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
+        print(f"Could not fetch or parse the live spec from {SPEC_URL}: {type(e).__name__}: {e}")
+        sys.exit(2)
 
 
 def extract_signature(spec: dict) -> dict:
-    """Map "METHOD /path" -> sorted list of query-param names, for every operation."""
+    """Map "METHOD /path" -> sorted list of query-param names, for every operation.
+
+    Parameter entries that are unresolved $ref objects (no inline "name") are skipped
+    rather than crashing -- this only affects the param-name diff for that operation, and
+    a genuinely new $ref-based parameter still shows up if it changes the sorted list for
+    entries this function CAN read.
+    """
     sig = {}
     for path, methods in spec.get("paths", {}).items():
         for method, op in methods.items():
             if method.lower() not in ("get", "post", "put", "patch", "delete"):
                 continue
-            params = sorted(p["name"] for p in op.get("parameters", []))
+            params = sorted(p["name"] for p in op.get("parameters", []) if "name" in p)
             sig[f"{method.upper()} {path}"] = params
     return sig
 
 
 def main() -> int:
-    live = fetch_live_spec()
-
     if "--update" in sys.argv:
+        live = fetch_live_spec()
         SNAPSHOT_PATH.write_text(json.dumps(live, indent=2, ensure_ascii=False) + "\n")
         print(f"Snapshot updated: {SNAPSHOT_PATH}")
         return 0
@@ -48,6 +58,7 @@ def main() -> int:
         print(f"No snapshot at {SNAPSHOT_PATH}; run with --update first.")
         return 1
 
+    live = fetch_live_spec()
     snapshot = json.loads(SNAPSHOT_PATH.read_text())
 
     snap_sig = extract_signature(snapshot)

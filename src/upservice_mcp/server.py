@@ -23,11 +23,24 @@ Notes on coverage:
     optional `extra_fields` dict that is merged into the JSON body verbatim,
     so advanced/uncommon fields documented in the Upservice API can still be
     supplied without waiting for this server to be updated.
+
+Notes on error handling:
+    Each tool's own `except Exception as e: return _handle_api_error(e)` only
+    covers errors raised while the tool body runs (HTTP/API failures). Invalid
+    *arguments* (wrong type, extra field, a string shorter than min_length,
+    etc.) are rejected by FastMCP's Pydantic-based argument validation before
+    the tool body starts, so they surface as an MCP-level tool error rather
+    than the `_handle_api_error()`-formatted "Error: ..." string. Both are
+    valid, clearly-labeled error responses to the calling client -- just via
+    two different channels depending on whether the problem is in the request
+    shape or in what the API did with a well-formed request.
 """
 
 import asyncio
 import json
 import os
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional, Union
 
@@ -135,13 +148,66 @@ class DirectoryRelationType(str, Enum):
 # Shared HTTP client / error handling
 # ---------------------------------------------------------------------------
 
+_client: Optional[httpx.AsyncClient] = None
+
+
+def _get_client() -> httpx.AsyncClient:
+    """Lazily create one shared httpx client so requests reuse pooled TCP/TLS connections
+    instead of paying a fresh handshake on every tool call. Never explicitly closed — this
+    server runs as a long-lived stdio process, and the socket is reclaimed on exit."""
+    global _client
+    if _client is None:
+        _client = httpx.AsyncClient(base_url=API_BASE_URL, timeout=60.0, follow_redirects=True)
+    return _client
+
+
+def _parse_retry_after(value: Optional[str], attempt: int) -> float:
+    """Parse a Retry-After header, which per RFC 9110 may be delay-seconds OR an HTTP-date.
+    Falls back to exponential backoff if the header is absent or unparseable in either form."""
+    if value:
+        try:
+            return float(value)
+        except ValueError:
+            pass
+        try:
+            retry_at = parsedate_to_datetime(value)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            delay = (retry_at - datetime.now(timezone.utc)).total_seconds()
+            if delay > 0:
+                return delay
+        except (TypeError, ValueError):
+            pass
+    return float(2 ** attempt)
+
+
+async def _send_with_retry(client: httpx.AsyncClient, method: str, path: str, **kwargs: Any) -> httpx.Response:
+    """Send a request, retrying on 429/5xx with backoff (honoring Retry-After when present).
+    Shared by _request() and _upload_file() so both get the same resilience."""
+    for attempt in range(MAX_RETRIES + 1):
+        response = await client.request(method, path, **kwargs)
+        if response.status_code in RETRYABLE_STATUS_CODES and attempt < MAX_RETRIES:
+            await asyncio.sleep(_parse_retry_after(response.headers.get("Retry-After"), attempt))
+            continue
+        return response
+    return response
+
+
 async def _request(
     method: str,
     path: str,
     params: Optional[Dict[str, Any]] = None,
     json_body: Optional[Dict[str, Any]] = None,
+    strip_body_none: bool = True,
 ) -> Any:
-    """Reusable async request function used by every tool in this server."""
+    """Reusable async request function used by every tool in this server.
+
+    strip_body_none: when True (default), None-valued body keys are dropped so optional
+    fields the caller didn't set aren't sent as explicit nulls. Pass False for tools where
+    the caller may deliberately send `null` to clear a field server-side — the caller is
+    then responsible for building json_body with only explicitly-set keys (e.g. via
+    model_dump(exclude_unset=True)) so unset fields aren't sent as null either.
+    """
     if not API_KEY:
         raise RuntimeError(
             "UPSERVICE_API_KEY is not set. Configure it as an environment variable "
@@ -149,36 +215,24 @@ async def _request(
             "account settings)."
         )
 
-    # Drop None values so we don't send empty query params / body fields.
     clean_params = _strip_none(params) if params else None
-    clean_body = _strip_none(json_body) if json_body else None
+    clean_body = (_strip_none(json_body) if strip_body_none else json_body) if json_body else None
 
     headers = {
         "Authorization": API_KEY,
         "Accept": "application/json",
     }
 
-    async with httpx.AsyncClient(base_url=API_BASE_URL, timeout=60.0, follow_redirects=True) as client:
-        for attempt in range(MAX_RETRIES + 1):
-            response = await client.request(
-                method,
-                path,
-                params=clean_params,
-                json=clean_body,
-                headers=headers,
-            )
-            if response.status_code in RETRYABLE_STATUS_CODES and attempt < MAX_RETRIES:
-                retry_after = response.headers.get("Retry-After")
-                delay = float(retry_after) if retry_after else (2 ** attempt)
-                await asyncio.sleep(delay)
-                continue
-            response.raise_for_status()
-            if not response.content:
-                return {}
-            try:
-                return response.json()
-            except ValueError:
-                return {"raw_response": response.text}
+    response = await _send_with_retry(
+        _get_client(), method, path, params=clean_params, json=clean_body, headers=headers
+    )
+    response.raise_for_status()
+    if not response.content:
+        return {}
+    try:
+        return response.json()
+    except ValueError:
+        return {"raw_response": response.text}
 
 
 async def _upload_file(path: str, file_path: str) -> Any:
@@ -195,15 +249,20 @@ async def _upload_file(path: str, file_path: str) -> Any:
     headers = {"Authorization": API_KEY, "Accept": "application/json"}
     filename = os.path.basename(file_path)
     with open(file_path, "rb") as f:
-        async with httpx.AsyncClient(base_url=API_BASE_URL, timeout=60.0, follow_redirects=True) as client:
-            response = await client.post(path, files={"file": (filename, f)}, headers=headers)
-            response.raise_for_status()
-            if not response.content:
-                return {}
-            try:
-                return response.json()
-            except ValueError:
-                return {"raw_response": response.text}
+        file_bytes = f.read()
+
+    # Pass raw bytes (not the file handle) so a retry re-sends the same content instead of
+    # an exhausted/empty stream.
+    response = await _send_with_retry(
+        _get_client(), "POST", path, files={"file": (filename, file_bytes)}, headers=headers
+    )
+    response.raise_for_status()
+    if not response.content:
+        return {}
+    try:
+        return response.json()
+    except ValueError:
+        return {"raw_response": response.text}
 
 
 def _strip_none(obj: Any) -> Any:
@@ -1012,9 +1071,11 @@ async def upservice_create_task(params: CreateTaskInput) -> str:
     try:
         body = params.model_dump(exclude={"extra_fields", "mentions"})
         body["kind"] = params.kind.value
-        body["description"] = _apply_mentions(params.description, params.mentions)
         if params.extra_fields:
             body.update(params.extra_fields)
+        # Apply after extra_fields so a caller can't accidentally clobber the substituted
+        # mention text by also passing a raw "description" in extra_fields.
+        body["description"] = _apply_mentions(params.description, params.mentions)
         data = await _request("POST", "/v1/tasks", json_body=body)
         return _ok(data)
     except Exception as e:
@@ -1076,10 +1137,12 @@ async def upservice_update_task(params: UpdateTaskInput) -> str:
     """
     try:
         body = params.model_dump(exclude={"task_id", "extra_fields", "mentions"})
-        if params.description is not None:
-            body["description"] = _apply_mentions(params.description, params.mentions)
         if params.extra_fields:
             body.update(params.extra_fields)
+        # Apply after extra_fields so a caller can't accidentally clobber the substituted
+        # mention text by also passing a raw "description" in extra_fields.
+        if params.description is not None:
+            body["description"] = _apply_mentions(params.description, params.mentions)
         data = await _request("PATCH", f"/v1/tasks/{params.task_id}", json_body=body)
         return _ok(data)
     except Exception as e:
@@ -1562,7 +1625,7 @@ class UpdateDirectoryRecordInput(BaseModel):
 
     record_id: int = Field(..., description="The Upservice directory record ID to update")
     title: Optional[str] = Field(default=None, description="New title")
-    responsible: Optional[int] = Field(default=None, description="New responsible employee ID. Omit to leave unchanged; use null to clear.")
+    responsible: Optional[int] = Field(default=None, description="New responsible employee ID. Omit to leave unchanged; pass null to clear.")
     description: Optional[str] = Field(default=None, description="New description")
     extra_fields: Optional[Dict[str, Any]] = Field(default=None, description="Additional raw fields to merge into the request body")
 
@@ -1574,6 +1637,9 @@ class UpdateDirectoryRecordInput(BaseModel):
 async def upservice_update_directory_record(params: UpdateDirectoryRecordInput) -> str:
     """Partially update a directory record's fields.
 
+    Only fields you explicitly pass are sent — an omitted field is left unchanged, while an
+    explicit `null` (e.g. responsible=null) is sent as-is and clears that field server-side.
+
     Args:
         params (UpdateDirectoryRecordInput): record_id (int) plus any fields to change, extra_fields for the rest
 
@@ -1581,10 +1647,12 @@ async def upservice_update_directory_record(params: UpdateDirectoryRecordInput) 
         str: JSON of the updated record.
     """
     try:
-        body = params.model_dump(exclude={"record_id", "extra_fields"})
+        body = params.model_dump(exclude={"record_id", "extra_fields"}, exclude_unset=True)
         if params.extra_fields:
             body.update(params.extra_fields)
-        data = await _request("PATCH", f"/v1/directory-records/{params.record_id}", json_body=body)
+        data = await _request(
+            "PATCH", f"/v1/directory-records/{params.record_id}", json_body=body, strip_body_none=False
+        )
         return _ok(data)
     except Exception as e:
         return _handle_api_error(e)
@@ -1658,8 +1726,6 @@ async def upservice_bulk_update_directory_relations(params: BulkUpdateRelationsI
     """
     try:
         body = {"relations": [r.model_dump(mode="json") for r in params.relations]}
-        for r in body["relations"]:
-            r["rel_type"] = r["rel_type"]
         data = await _request("POST", f"/v1/directory-records/{params.record_id}/relations/bulk-update", json_body=body)
         return _ok(data)
     except Exception as e:
@@ -1733,6 +1799,7 @@ class SendMessageInput(BaseModel):
 
     content: str = Field(..., description=f"Plain-text message content to send. {MENTION_HINT}")
     message_id: Optional[str] = Field(default=None, description="Optional client-supplied UUID for the message (for idempotency/de-duplication)")
+    mentions: Optional[List[MentionInput]] = Field(default=None, description="Employees to mention in `content`. Put a `{{employee_id}}` placeholder in the content text for each mention; it will be substituted with the correct @[Name](id) syntax.")
 
 
 @mcp.tool(
@@ -1743,13 +1810,13 @@ async def upservice_create_external_message(params: SendMessageInput) -> str:
     """Create a new external/inbound message (e.g. from an external channel integration).
 
     Args:
-        params (SendMessageInput): content (str), message_id (optional UUID str)
+        params (SendMessageInput): content (str), message_id (optional UUID str), mentions (optional)
 
     Returns:
         str: JSON of the created message.
     """
     try:
-        body = {"content": params.content, "message_id": params.message_id}
+        body = {"content": _apply_mentions(params.content, params.mentions), "message_id": params.message_id}
         data = await _request("POST", "/v1/channels/messages", json_body=body)
         return _ok(data)
     except Exception as e:
@@ -1786,9 +1853,11 @@ async def upservice_send_channel_message(params: SendChannelMessageInput) -> str
     """
     try:
         body = params.model_dump(exclude={"channel_unique_identifier", "extra_fields", "mentions"})
-        body["content"] = _apply_mentions(params.content, params.mentions)
         if params.extra_fields:
             body.update(params.extra_fields)
+        # Apply after extra_fields so a caller can't accidentally clobber the substituted
+        # mention text by also passing a raw "content" in extra_fields.
+        body["content"] = _apply_mentions(params.content, params.mentions)
         data = await _request("POST", f"/v1/channels/messages/{params.channel_unique_identifier}/", json_body=body)
         return _ok(data)
     except Exception as e:
