@@ -25,6 +25,7 @@ Notes on coverage:
     supplied without waiting for this server to be updated.
 """
 
+import asyncio
 import json
 import os
 from enum import Enum
@@ -40,6 +41,8 @@ from mcp.server.fastmcp import FastMCP
 
 API_BASE_URL = os.environ.get("UPSERVICE_API_BASE_URL", "https://public.upservice.io").rstrip("/")
 API_KEY = os.environ.get("UPSERVICE_API_KEY", "")
+MAX_RETRIES = 3
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 mcp = FastMCP("upservice_mcp")
 
@@ -156,20 +159,26 @@ async def _request(
     }
 
     async with httpx.AsyncClient(base_url=API_BASE_URL, timeout=60.0, follow_redirects=True) as client:
-        response = await client.request(
-            method,
-            path,
-            params=clean_params,
-            json=clean_body,
-            headers=headers,
-        )
-        response.raise_for_status()
-        if not response.content:
-            return {}
-        try:
-            return response.json()
-        except ValueError:
-            return {"raw_response": response.text}
+        for attempt in range(MAX_RETRIES + 1):
+            response = await client.request(
+                method,
+                path,
+                params=clean_params,
+                json=clean_body,
+                headers=headers,
+            )
+            if response.status_code in RETRYABLE_STATUS_CODES and attempt < MAX_RETRIES:
+                retry_after = response.headers.get("Retry-After")
+                delay = float(retry_after) if retry_after else (2 ** attempt)
+                await asyncio.sleep(delay)
+                continue
+            response.raise_for_status()
+            if not response.content:
+                return {}
+            try:
+                return response.json()
+            except ValueError:
+                return {"raw_response": response.text}
 
 
 async def _upload_file(path: str, file_path: str) -> Any:

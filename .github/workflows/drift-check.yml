@@ -1,0 +1,39 @@
+name: API drift check
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check for API drift
+        id: check
+        run: |
+          if ! python scripts/check_api_drift.py > drift_report.txt 2>&1; then
+            echo "drift=true" >> "$GITHUB_OUTPUT"
+          fi
+          cat drift_report.txt
+
+      - name: Open or update issue on drift
+        if: steps.check.outputs.drift == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          existing=$(gh issue list --label api-drift --state open --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body-file drift_report.txt
+          else
+            gh issue create --title "Upservice API drift detected" --body-file drift_report.txt --label api-drift
+          fi
