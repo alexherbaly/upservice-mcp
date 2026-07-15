@@ -1,5 +1,7 @@
 # Upservice MCP Server
 
+*[Читать на русском](README.ru.md)*
+
 An MCP (Model Context Protocol) server that wraps the [Upservice Public API](https://public.upservice.io/redoc) so Claude (or any MCP client) can manage employees, projects, sprints, tasks, tags, directories, and channel messages directly.
 
 Built from the OpenAPI spec at `https://public.upservice.io/openapi.json`, verified against the live API.
