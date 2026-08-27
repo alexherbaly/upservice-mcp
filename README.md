@@ -30,14 +30,18 @@ Get your Upservice API key first: in your Upservice account, go to account setti
 
 ### Option A — `uvx` (recommended, no manual install)
 
-Requires [`uv`](https://docs.astral.sh/uv/) installed (`brew install uv` or see their docs). Add to your MCP client config (e.g. `claude_desktop_config.json`):
+Requires [`uv`](https://docs.astral.sh/uv/) installed (`brew install uv` or see their docs). `git` is **not** needed.
+
+1. Download the project as a ZIP: open [the repository](https://github.com/alexherbaly/upservice-mcp) on GitHub and click **Code → Download ZIP**.
+2. Unpack it wherever you like (e.g. `~/upservice-mcp`). The folder you point at below is the one that contains `pyproject.toml`.
+3. Add to your MCP client config (e.g. `claude_desktop_config.json`), using the absolute path to that folder:
 
 ```json
 {
   "mcpServers": {
     "upservice": {
       "command": "uvx",
-      "args": ["--from", "/absolute/path/to/upservice_mcp", "upservice-mcp"],
+      "args": ["--from", "/absolute/path/to/upservice-mcp", "upservice-mcp"],
       "env": {
         "UPSERVICE_API_KEY": "UPS-XXXX-XXXX-XXXX-XXXX"
       }
@@ -46,17 +50,9 @@ Requires [`uv`](https://docs.astral.sh/uv/) installed (`brew install uv` or see 
 }
 ```
 
-If this project is published to a git remote, `--from` can point at it directly instead of a local path:
-`"args": ["--from", "git+https://github.com/alexherbaly/upservice-mcp", "upservice-mcp"]` — then a colleague only needs the URL and their own API key, no file copying at all.
-
-Pin to a ref rather than the bare URL — without one, `uvx` tracks the `main` branch, so a bad push to `main` breaks everyone's server on their next run. Two options:
-
-- **`@stable`** (recommended for colleagues) — a tag that CI automatically moves to the tip of `main` every time the build passes. No one has to remember to cut a release for routine fixes; everyone's server just picks up the latest known-good commit next time it restarts.
-- **`@v0.2.0`** (a specific version) — frozen forever at that exact commit, for when you want a name you can point back to later (release notes, "the version we tested on date X"). Cut these manually with `git tag` when it's worth a name, not on every push.
-
-Example: `"args": ["--from", "git+https://github.com/alexherbaly/upservice-mcp@stable", "upservice-mcp"]`
-
 `uv` builds and caches an isolated environment on first run; nothing is installed system-wide.
+
+**Updating:** there is no auto-update. To get a newer version, download a fresh ZIP, replace the folder's contents, and restart your MCP client — `uv` rebuilds the environment from the changed source.
 
 ### Option B — plain venv + pip
 
