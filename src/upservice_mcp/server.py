@@ -1897,9 +1897,33 @@ async def upservice_send_chat_message(params: SendChatMessageInput) -> str:
         return _handle_api_error(e)
 
 
+DRIVE_FILE_PREFIX = "drive-"
+
+_DRIVE_FILE_MESSAGE = (
+    "Файл хранится в drive-сторадже, получение ссылки через этот метод не поддерживается "
+    "— скачайте файл вручную через веб-интерфейс Upservice."
+)
+
+
+def _drive_file_guard(file_id: str) -> Optional[str]:
+    """Return an explanatory message for drive-* file IDs, else None.
+
+    The Upservice API answers 500 for these IDs, so we never issue the request.
+    """
+    if file_id.strip().lower().startswith(DRIVE_FILE_PREFIX):
+        return _DRIVE_FILE_MESSAGE
+    return None
+
+
 class FileIdInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    file_id: str = Field(..., description="The Upservice file ID (from an attachment or upload)")
+    file_id: str = Field(
+        ...,
+        description=(
+            "The Upservice file ID (from an attachment or upload). IDs starting with "
+            "'drive-' are stored in the drive storage and have no download URL."
+        ),
+    )
 
 
 @mcp.tool(
@@ -1909,12 +1933,18 @@ class FileIdInput(BaseModel):
 async def upservice_get_file_url(params: FileIdInput) -> str:
     """Get a fresh, time-limited download URL for a file/attachment.
 
+    File IDs starting with 'drive-' are not supported by this endpoint (the API returns 500);
+    such files must be downloaded manually from the Upservice web interface.
+
     Args:
         params (FileIdInput): file_id (str)
 
     Returns:
-        str: JSON containing the file's download URL.
+        str: JSON containing the file's download URL, or an explanatory message for drive-* IDs.
     """
+    guard = _drive_file_guard(params.file_id)
+    if guard:
+        return guard
     try:
         data = await _request("GET", f"/v1/files/{params.file_id}/url")
         return _ok(data)
@@ -1976,7 +2006,13 @@ async def upservice_upload_file_to_channel(params: UploadFileToChannelInput) -> 
 class ChannelFileIdInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     channel_unique_identifier: str = Field(..., description="The channel's unique identifier (UUID)")
-    file_id: str = Field(..., description="The Upservice file ID (from an attachment or upload)")
+    file_id: str = Field(
+        ...,
+        description=(
+            "The Upservice file ID (from an attachment or upload). IDs starting with "
+            "'drive-' are stored in the drive storage and have no download URL."
+        ),
+    )
 
 
 @mcp.tool(
@@ -1986,12 +2022,18 @@ class ChannelFileIdInput(BaseModel):
 async def upservice_get_channel_file_url(params: ChannelFileIdInput) -> str:
     """Get a fresh, time-limited download URL for a file/attachment scoped to an external channel.
 
+    File IDs starting with 'drive-' are not supported by this endpoint (the API returns 500);
+    such files must be downloaded manually from the Upservice web interface.
+
     Args:
         params (ChannelFileIdInput): channel_unique_identifier (str), file_id (str)
 
     Returns:
-        str: JSON containing the file's download URL.
+        str: JSON containing the file's download URL, or an explanatory message for drive-* IDs.
     """
+    guard = _drive_file_guard(params.file_id)
+    if guard:
+        return guard
     try:
         data = await _request("GET", f"/v1/files/{params.channel_unique_identifier}/{params.file_id}/url")
         return _ok(data)
