@@ -8,13 +8,13 @@ Built from the OpenAPI spec at `https://public.upservice.io/openapi.json`, verif
 
 ## What it can do
 
-58 tools covering:
+60 tools covering:
 
 - **Employees** — list employees
 - **Projects** — list, create, get, update, delete, set managers/members, mark completed
 - **Sprints** — list, create, get, update, delete, complete, activate, add tasks
-- **Tags** — list, create, update, delete, assign/unassign to tasks/chats/assets/contacts/attachments
-- **Tasks** — list/search, create, get, update, delete, attachments, status changes, effort estimation, worklog, agreement (approval) workflow actions, co-responsibles, agreement/acquaintance sheets
+- **Tags** — list, create, update, delete, assign/unassign to tasks/chats/assets/contacts/attachments, list the tags on one entity
+- **Tasks** — list/search, create, get, update, delete, attachments, status changes, effort estimation, worklog (read entries / log effort), agreement (approval) workflow actions, co-responsibles, agreement/acquaintance sheets
 - **Directories** (custom reference catalogs) — list/create/get/update/delete directories and their records, plus bulk relation management (linking records to tasks, projects, orders, etc.)
 - **Channels & files** — load/send chat messages, send channel messages, upload files, get file download URLs
 
@@ -22,7 +22,7 @@ Every write tool exposes the well-documented fields explicitly (validated), and 
 
 **Mentioning employees:** Upservice only turns `@Name` into a real, notifying mention if it's written as `@[Name](employee_id)`. Tools that write text (`upservice_send_chat_message`, `upservice_send_channel_message`, `upservice_create_task`, `upservice_update_task`) accept a `mentions: [{employee_id, display_name}]` field — put a `{{employee_id}}` placeholder in your text and the server substitutes the correct syntax for you.
 
-**Known API limitation:** `GET /v1/tasks` (used by `upservice_list_tasks`) has no `status`/`is_completed` filter — confirmed against the live API, not just the docs. Filter by `status` client-side after narrowing with `date_end_gte`/`date_end_lte`, `project`, `author`, or `responsible`.
+**Task filters:** `upservice_list_tasks` filters server-side by `status`, `sprint_id`, and `without_sprint` (`true` — only tasks with no sprint, `false` — only tasks with one). The API documents several `status`/`sprint_id` values as OR, but the live API applies only the last one, so the tool accepts a single value per call. `without_sprint=true` together with `sprint_id` is rejected by the tool before any request is sent.
 
 ## Setup
 

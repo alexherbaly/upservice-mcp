@@ -968,6 +968,35 @@ async def upservice_unassign_tag(params: AssignTagInput) -> str:
         return _handle_api_error(e)
 
 
+class ListEntityTagsInput(PaginationInput):
+    entity_type: TagEntityType = Field(..., description="Type of entity: task, channel_chat, asset, contact, or attachment")
+    entity_id: Union[str, int] = Field(..., description="ID of the entity (UUID string or integer ID depending on entity_type)")
+
+
+@mcp.tool(
+    name="upservice_list_entity_tags",
+    annotations={"title": "List Upservice Entity Tags", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+)
+async def upservice_list_entity_tags(params: ListEntityTagsInput) -> str:
+    """List the tags currently assigned to one entity (task, chat, asset, contact, or attachment).
+
+    Args:
+        params (ListEntityTagsInput): entity_type (enum), entity_id (UUID or int), limit, offset
+
+    Returns:
+        str: JSON page of tags (id, name, color, type) — same fields as upservice_list_tags.
+    """
+    try:
+        data = await _request(
+            "GET",
+            f"/v1/tags/entities/{params.entity_type.value}/{params.entity_id}",
+            params=params.model_dump(exclude={"entity_type", "entity_id"}),
+        )
+        return _ok(data)
+    except Exception as e:
+        return _handle_api_error(e)
+
+
 # ===========================================================================
 # TASKS
 # ===========================================================================
@@ -987,6 +1016,9 @@ class ListTasksInput(PaginationInput):
     date_end_lte: Optional[str] = Field(default=None, description="Due date (to), ISO 8601")
     tags_ids: Optional[List[str]] = Field(default=None, description="Filter by one or more tag UUIDs")
     tags_condition: Optional[TagsCondition] = Field(default=None, description="How to combine tags_ids: contains_any, contains_all, not_contain_all, untagged, any")
+    status: Optional[List[TaskStatus]] = Field(default=None, description="Filter by task status. Pass a single value (see the tool description for why lists of 2+ are rejected): todo, notassigned, backlog, progress, review, completed, cancelled, rejected, deleted, pending, outdated, ai, onhold")
+    sprint_id: Optional[List[int]] = Field(default=None, description="Filter by sprint ID. Pass a single value (see the tool description for why lists of 2+ are rejected). Cannot be combined with without_sprint=true.")
+    without_sprint: Optional[bool] = Field(default=None, description="true = only tasks with no sprint, false = only tasks that have a sprint, omit = don't filter by sprint presence. true cannot be combined with sprint_id.")
 
 
 @mcp.tool(
@@ -994,36 +1026,45 @@ class ListTasksInput(PaginationInput):
     annotations={"title": "List Upservice Tasks", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
 )
 async def upservice_list_tasks(params: ListTasksInput) -> str:
-    """List/search tasks with optional filters for kind, project, author, responsible, date ranges, and tags.
+    """List/search tasks with optional filters for kind, project, author, responsible, status, sprint, date ranges, and tags.
 
-    CONFIRMED LIMITATION (verified against the live API, not just the OpenAPI spec): this
-    endpoint has no status/status_in/is_completed/completed/query filter. Passing any of
-    those as extra query params is silently ignored server-side (no error, no effect on
-    results) — status filtering must be done client-side on the returned `status` field.
-    There is no workaround on the Upservice API today; this has been reported to Upservice
-    as a feature request. Until it lands, narrow results with `date_end_gte`/`date_end_lte`
-    (due-date range) plus `project`/`author`/`responsible` BEFORE paginating and filtering
-    by status client-side — e.g. for "open overdue tasks", pass
-    date_end_lte=<now, ISO 8601> together with project/responsible to get a small candidate
-    set, then drop any whose `status` is completed/cancelled/rejected/deleted. Do not call
-    this with only `author` (or no filters) and try to page through everything — accounts
-    can have 100k+ tasks and completed_at/date filters are the only server-side way to keep
-    that bounded.
+    `status` and `sprint_id` are lists in the API schema and documented as OR, but the live
+    API (verified 2026-10-16) applies only the LAST repeated value — status=["backlog",
+    "review"] silently returns just the review tasks. To avoid wrong results, this tool
+    rejects lists of 2+ values for either filter; call it once per value and merge.
+    `without_sprint=true` returns only tasks with no sprint, `without_sprint=false` only
+    tasks that have one. `without_sprint=true` together with `sprint_id` is rejected before
+    the request is sent (documented as 422, the live API answers 500). Accounts can have
+    100k+ tasks — narrow with status/project/sprint/date filters rather than paging through
+    everything. Note that `work_log_total` is always 0 in this list; use
+    upservice_get_task or upservice_get_task_worklog for logged time.
 
     Args:
-        params (ListTasksInput): limit, offset, kind, project, author, responsible,
-            created_at_gte/lte, completed_at_gte/lte, date_start_gte/lte, date_end_gte/lte,
-            tags_ids, tags_condition (all optional except pagination defaults)
+        params (ListTasksInput): limit, offset, kind, project, author, responsible, status,
+            sprint_id, without_sprint, created_at_gte/lte, completed_at_gte/lte,
+            date_start_gte/lte, date_end_gte/lte, tags_ids, tags_condition
+            (all optional except pagination defaults)
 
     Returns:
         str: JSON list of tasks matching the filters.
     """
+    if params.without_sprint and params.sprint_id:
+        return "Error: without_sprint=true cannot be combined with sprint_id. Pass one or the other."
+    multi = [name for name in ("status", "sprint_id") if len(getattr(params, name) or []) > 1]
+    if multi:
+        return (
+            f"Error: pass a single value for {', '.join(multi)}. The live Upservice API applies only the "
+            "last of several values (not OR as documented), so a multi-value filter would return wrong "
+            "results. Call upservice_list_tasks once per value and merge."
+        )
     try:
-        p = params.model_dump(exclude={"kind", "tags_condition"})
+        p = params.model_dump(exclude={"kind", "tags_condition", "status"})
         if params.kind:
             p["kind"] = params.kind.value
         if params.tags_condition:
             p["tags_condition"] = params.tags_condition.value
+        if params.status:
+            p["status"] = [s.value for s in params.status]
         data = await _request("GET", "/v1/tasks", params=p)
         return _ok(data)
     except Exception as e:
@@ -1239,6 +1280,37 @@ async def upservice_update_task_estimation(params: UpdateTaskEstimationInput) ->
     """
     try:
         data = await _request("PUT", f"/v1/tasks/{params.task_id}/estimation", json_body={"estimation": params.estimation})
+        return _ok(data)
+    except Exception as e:
+        return _handle_api_error(e)
+
+
+class GetTaskWorklogInput(PaginationInput):
+    task_id: int = Field(..., description="The Upservice task ID")
+
+
+@mcp.tool(
+    name="upservice_get_task_worklog",
+    annotations={"title": "Get Upservice Task Worklog", "readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+)
+async def upservice_get_task_worklog(params: GetTaskWorklogInput) -> str:
+    """List the worklog entries (logged actual effort) on a task, one page at a time.
+
+    This is a flat list of entries: there are no per-employee or per-period aggregates, so
+    sum or group `value` client-side. The sum of `value` across all pages matches
+    `work_log_total` on the task card.
+
+    Args:
+        params (GetTaskWorklogInput): task_id (int), limit (1-100, default 25), offset (default 0)
+
+    Returns:
+        str: JSON page (count, next, previous, results) of worklog entries (id, employee,
+            value in minutes, started_at, description, description_text, kind).
+    """
+    try:
+        data = await _request(
+            "GET", f"/v1/tasks/{params.task_id}/worklog", params=params.model_dump(exclude={"task_id"})
+        )
         return _ok(data)
     except Exception as e:
         return _handle_api_error(e)
